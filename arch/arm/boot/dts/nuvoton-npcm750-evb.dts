@@ -79,6 +79,13 @@
 			no-map;
 		};
 
+                video_memory: framebuffer {
+                       reg = <0x1b000000 0x01000000>;
+                       alignment = <0x01000000>;
+                       compatible = "shared-dma-pool";
+                       reusable;
+               };
+
 	};
 
 	regulators {
@@ -336,7 +343,7 @@
 
 &vcd {
 	status = "okay";
-	memory-region = <&vcd_memory>;
+	memory-region = <&video_memory>;
 };
 
 &ece {
