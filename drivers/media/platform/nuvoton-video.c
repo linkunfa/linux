@@ -2,6 +2,7 @@
 
 #include <linux/atomic.h>
 #include <linux/bitfield.h>
+#include <linux/bitmap.h>
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/device.h>
@@ -48,6 +49,8 @@
 
 #define STOP_TIMEOUT			msecs_to_jiffies(500)
 #define VCD_MAX_SRC_BUFFER_SIZE	0x500000 /* 1920 * 1200, depth 16 */
+
+#define BITMAP_SIZE 32
 
 /* VCD  Register */
 #define VCD_DIFF_TBL 0x0000
@@ -529,20 +532,20 @@ static int nuvoton_video_build_table(struct nuvoton_video *video,
 				     struct rect_list_info *info)
 {
 	int i = info->index;
-	int j, z, ret;
-	u32 bitmap;
+	int j, ret, bit;
+	u32 value;
 	struct regmap *vcd = video->vcd_regmap;
 
 	for (j = 0 ; j < info->offset_perline ; j += 4) {
-		regmap_read(vcd, VCD_DIFF_TBL + (j + i), &bitmap);
-		if (bitmap != 0) {
-			for (z = 0 ; z < 32; z++) {
-				if ((bitmap >> z) & 0x01) {
-					ret = nuvoton_video_find_rect(video, info, z + (j << 3));
-					if (ret < 0)
-						return ret;
-				}
-			}
+		regmap_read(vcd, VCD_DIFF_TBL + (j + i), &value);
+
+		DECLARE_BITMAP(bitmap, BITMAP_SIZE);
+		bitmap_from_arr32(bitmap, &value, BITMAP_SIZE);
+
+		for_each_set_bit(bit, bitmap, BITMAP_SIZE) {
+			ret = nuvoton_video_find_rect(video, info, bit + (j << 3));
+			if (ret < 0)
+				return ret;
 		}
 	}
 	info->index += 64;
