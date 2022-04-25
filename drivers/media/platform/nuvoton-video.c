@@ -9,12 +9,14 @@
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
 #include <linux/jiffies.h>
+#include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
+#include <linux/regmap.h>
 #include <linux/reset.h>
 #include <linux/sched.h>
 #include <linux/spinlock.h>
@@ -30,318 +32,170 @@
 #include <media/v4l2-event.h>
 #include <media/v4l2-ioctl.h>
 #include <media/videobuf2-dma-contig.h>
-#include <linux/regmap.h>
-#include <linux/mfd/syscon.h>
 
 #define DEVICE_NAME			"nuvoton-video"
-#define NUM_FORMATS 1
 
 #define MAX_FRAME_RATE			60
-#define MAX_WIDTH	1920
-#define MAX_HEIGHT	1200
-#define MIN_WIDTH	320
-#define MIN_HEIGHT	240
-#define MIN_LP	512
-#define MAX_LP	4096
+#define MAX_WIDTH			1920
+#define MAX_HEIGHT			1200
+#define MIN_WIDTH			320
+#define MIN_HEIGHT			240
+#define MIN_LP				512
+#define MAX_LP				4096
+#define RECT_W				16
+#define RECT_H				16
+#define BITMAP_SIZE 			32
 
-#define RECT_W	16
-#define RECT_H	16
+#define VCD_MODULE_NAME			"vcd"
+#define ECE_MODULE_NAME			"ece"
 
-#define VCD_MAX_SRC_BUFFER_SIZE	0x500000 /* 1920 * 1200, depth 16 */
+/* VCD Registers */
+#define VCD_DIFF_TBL			0x0000
+#define VCD_FBA_ADR			0x8000
+#define VCD_FBB_ADR			0x8004
 
-#define BITMAP_SIZE 32
+#define VCD_FB_LP			0x8008
+#define  VCD_FBA_LP			GENMASK(15, 0)
+#define  VCD_FBB_LP			GENMASK(31, 16)
 
-/* VCD  Register */
-#define VCD_MODULE_NAME	"vcd"
-#define VCD_DIFF_TBL 0x0000
-#define VCD_FBA_ADR	0x8000
-#define VCD_FBB_ADR	0x8004
+#define VCD_CAP_RES			0x800C
+#define  VCD_CAP_RES_VERT_RES		GENMASK(10, 0)
+#define  VCD_CAP_RES_HOR_RES		GENMASK(26, 16)
 
-#define VCD_FB_LP	0x8008
-#define  VCD_FB_LP_MASK 0xffff
-#define  VCD_FBB_LP_OFFSET 16
+#define VCD_MODE			0x8014
+#define  VCD_MODE_VCDE			BIT(0)
+#define  VCD_MODE_CM565			BIT(1)
+#define  VCD_MODE_IDBC			BIT(3)
+#define  VCD_MODE_COLOR_CNVRT		GENMASK(5, 4)
+#define   VCD_MODE_COLOR_CNVRT_NO_CNVRT	0
+#define   VCD_MODE_COLOR_CNVRT_RGB_222	1
+#define   VCD_MODE_COLOR_CNVRT_666_MODE	2
+#define   VCD_MODE_COLOR_CNVRT_RGB_888	3
+#define  VCD_MODE_KVM_BW_SET		BIT(16)
 
-#define VCD_CAP_RES	0x800C
-#define  VCD_CAPRES_MASK 0x7ff
+#define VCD_CMD				0x8018
+#define  VCD_CMD_GO			BIT(0)
+#define  VCD_CMD_RST			BIT(1)
+#define  VCD_CMD_OPERATION		GENMASK(6, 4)
+#define   VCD_CMD_OPERATION_CAPTURE	0
+#define   VCD_CMD_OPERATION_COMPARE	2
 
-#define VCD_DVO_DEL 0x8010
-#define  VCD_DVO_DEL_VERT_HOFF GENMASK(31, 27)
-#define  VCD_DVO_DEL_MASK 0x7ff
-#define  VCD_DVO_DEL_VERT_HOFF_OFFSET 27
-#define  VCD_DVO_DEL_VSYNC_DEL_OFFSET 16
-#define  VCD_DVO_DEL_HSYNC_DEL_OFFSET 0
+#define	VCD_STAT			0x801C
+#define	 VCD_STAT_DONE			BIT(0)
+#define	 VCD_STAT_IFOT			BIT(2)
+#define	 VCD_STAT_IFOR			BIT(3)
+#define	 VCD_STAT_BUSY			BIT(30)
+#define	VCD_STAT_CLEAR			0x3FFF
 
-#define VCD_MODE	0x8014
-#define  VCD_MODE_VCDE	BIT(0)
-#define  VCD_MODE_CM565	BIT(1)
-#define  VCD_MODE_IDBC	BIT(3)
-#define  VCD_MODE_COLOR_CNVRT	GENMASK(5, 4)
-#define  VCD_MODE_DAT_INV	BIT(6)
-#define  VCD_MODE_CLK_EDGE	BIT(8)
-#define  VCD_MODE_HS_EDGE	BIT(9)
-#define  VCD_MODE_VS_EDGE	BIT(10)
-#define  VCD_MODE_DE_HS		BIT(11)
-#define  VCD_MODE_KVM_BW_SET	BIT(16)
-#define  VCD_MODE_COLOR_NORM	0x0
-#define  VCD_MODE_COLOR_222		0x1
-#define  VCD_MODE_COLOR_666		0x2
-#define  VCD_MODE_COLOR_888		0x3
-#define  VCD_MODE_CM_555		0x0
-#define  VCD_MODE_CM_565		0x1
-#define  VCD_MODE_COLOR_CNVRT_OFFSET 4
+#define VCD_INTE			0x8020
+#define  VCD_INTE_DONE_IE		BIT(0)
+#define  VCD_INTE_IFOT_IE		BIT(2)
+#define  VCD_INTE_IFOR_IE		BIT(3)
 
-#define VCD_CMD			0x8018
-#define  VCD_CMD_GO	BIT(0)
-#define  VCD_CMD_RST	BIT(1)
-#define  VCD_CMD_OP_MASK	0x70
-#define  VCD_CMD_OP_OFFSET	4
-#define  VCD_CMD_OP_CAPTURE	0
-#define  VCD_CMD_OP_COMPARE_TWO	1
-#define  VCD_CMD_OP_COMPARE	2
+#define VCD_RCHG			0x8028
+#define VCD_RCHG_TIM_PRSCL		GENMASK(12, 9)
 
-#define	VCD_STAT		0x801C
-#define	 VCD_STAT_IRQ	BIT(31)
-#define	 VCD_STAT_BUSY	BIT(30)
-#define	 VCD_STAT_BSD3	BIT(13)
-#define	 VCD_STAT_BSD2	BIT(12)
-#define	 VCD_STAT_HSYNC	BIT(11)
-#define	 VCD_STAT_VSYNC	BIT(10)
-#define	 VCD_STAT_HLC_CHG	BIT(9)
-#define	 VCD_STAT_HAC_CHG	BIT(8)
-#define	 VCD_STAT_HHT_CHG	BIT(7)
-#define	 VCD_STAT_HCT_CHG	BIT(6)
-#define	 VCD_STAT_VHT_CHG	BIT(5)
-#define	 VCD_STAT_VCT_CHG	BIT(4)
-#define	 VCD_STAT_IFOR	BIT(3)
-#define	 VCD_STAT_IFOT	BIT(2)
-#define	 VCD_STAT_BSD1	BIT(1)
-#define	 VCD_STAT_DONE	BIT(0)
-#define	 VCD_STAT_CLEAR	0x3FFF
-#define	 VCD_STAT_CURR_LINE_OFFSET 16
-#define	 VCD_STAT_CURR_LINE 0x7ff0000
+#define VCD_FIFO			0x805C
+#define  VCD_FIFO_TH			0x100350FF
 
-#define VCD_INTE	0x8020
-#define  VCD_INTE_DONE_IE	BIT(0)
-#define  VCD_INTE_BSD_IE	BIT(1)
-#define  VCD_INTE_IFOT_IE	BIT(2)
-#define  VCD_INTE_IFOR_IE	BIT(3)
-#define  VCD_INTE_VCT_CHG_IE	BIT(4)
-#define  VCD_INTE_VHT_CHG_IE	BIT(5)
-#define  VCD_INTE_HCT_CHG_IE	BIT(6)
-#define  VCD_INTE_HHT_CHG_IE	BIT(7)
-#define  VCD_INTE_HAC_CHG_IE	BIT(8)
-#define  VCD_INTE_HLC_CHG_IE	BIT(9)
-#define  VCD_INTE_VSYNC_IE	BIT(10)
-#define  VCD_INTE_HSYNC_IE	BIT(11)
-#define  VCD_INTE_BSD2_IE	BIT(12)
-#define  VCD_INTE_BSD3_IE	BIT(13)
-#define  VCD_INTE_VAL	(VCD_INTE_DONE_IE)
+#define VCD_MAX_SRC_BUFFER_SIZE		0x500000 /* 1920 x 1200 x 2 bpp */
+#define VCD_KVM_BW_PCLK			120000000UL
+#define VCD_BUSY_TIMEOUT_US		50000
 
-#define VCD_RCHG	0x8028
-#define VCD_RCHG_TIM_PRSCL_OFFSET 9
-#define VCD_RCHG_IG_CHG2_OFFSET 6
-#define VCD_RCHG_IG_CHG1_OFFSET 3
-#define VCD_RCHG_IG_CHG0_OFFSET 0
-#define VCD_RCHG_TIM_PRSCL  GENMASK(12, VCD_RCHG_TIM_PRSCL_OFFSET)
-#define VCD_RCHG_IG_CHG2  GENMASK(8, VCD_RCHG_IG_CHG2_OFFSET)
-#define VCD_RCHG_IG_CHG1  GENMASK(5, VCD_RCHG_IG_CHG1_OFFSET)
-#define VCD_RCHG_IG_CHG0  GENMASK(2, VCD_RCHG_IG_CHG0_OFFSET)
+/* ECE Registers */
+#define ECE_DDA_CTRL			0x0000
+#define  ECE_DDA_CTRL_ECEEN		BIT(0)
+#define  ECE_DDA_CTRL_INTEN		BIT(8)
 
-#define VCD_HOR_CYC_TIM	0x802C
-#define VCD_HOR_CYC_TIM_NEW	BIT(31)
-#define VCD_HOR_CYC_TIM_HCT_DIF	BIT(30)
-#define VCD_HOR_CYC_TIM_VALUE	GENMASK(11, 0)
+#define ECE_DDA_STS			0x0004
+#define  ECE_DDA_STS_CDREADY		BIT(8)
+#define  ECE_DDA_STS_ACDRDY		BIT(10)
 
-#define VCD_HOR_CYC_LAST	0x8030
-#define VCD_HOR_CYC_LAST_VALUE	GENMASK(11, 0)
+#define ECE_FBR_BA			0x0008
+#define ECE_ED_BA			0x000C
+#define ECE_RECT_XY			0x0010
 
-#define VCD_HOR_HI_TIM	0x8034
-#define VCD_HOR_HI_TIM_NEW	BIT(31)
-#define VCD_HOR_HI_TIM_HHT_DIF	BIT(30)
-#define VCD_HOR_HI_TIM_VALUE	GENMASK(11, 0)
+#define ECE_RECT_DIMEN			0x0014
+#define  ECE_RECT_DIMEN_WR		GENMASK(10, 0)
+#define  ECE_RECT_DIMEN_WLTR		GENMASK(14, 11)
+#define  ECE_RECT_DIMEN_HR		GENMASK(26, 16)
+#define  ECE_RECT_DIMEN_HLTR		GENMASK(30, 27)
 
-#define VCD_HOR_HI_LAST	0x8038
-#define VCD_HOR_HI_LAST_VALUE	GENMASK(11, 0)
+#define ECE_RESOL			0x001C
+#define  ECE_RESOL_FB_LP_512		0
+#define  ECE_RESOL_FB_LP_1024		1
+#define  ECE_RESOL_FB_LP_2048		2
+#define  ECE_RESOL_FB_LP_2560		3
+#define  ECE_RESOL_FB_LP_4096		4
 
-#define VCD_VER_CYC_TIM	0x803C
-#define VCD_VER_CYC_TIM_NEW	BIT(31)
-#define VCD_VER_CYC_TIM_VCT_DIF	BIT(30)
-#define VCD_VER_CYC_TIM_VALUE	GENMASK(23, 0)
+#define ECE_HEX_CTRL			0x0040
+#define  ECE_HEX_CTRL_ENCDIS		BIT(0)
+#define  ECE_HEX_CTRL_ENC_GAP		GENMASK(12, 8)
 
-#define VCD_VER_CYC_LAST	0x8040
-#define VCD_VER_CYC_LAST_VALUE	GENMASK(23, 0)
+#define ECE_HEX_RECT_OFFSET		0x0048
+#define  ECE_HEX_RECT_OFFSET_MASK	GENMASK(22, 0)
 
-#define VCD_VER_HI_TIM	0x8044
-#define VCD_VER_HI_TIM_NEW	BIT(31)
-#define VCD_VER_HI_TIM_VHT_DIF	BIT(30)
-#define VCD_VER_HI_TIM_VALUE	GENMASK(23, 0)
+#define ECE_TILE_W			16
+#define ECE_TILE_H			16
+#define ECE_POLL_TIMEOUT_US		50000
 
-#define VCD_VER_HI_LAST	0x8048
-#define VCD_VER_HI_LAST_VALUE	GENMASK(23, 0)
+/* GCR Registers */
+#define INTCR				0x3C
+#define  INTCR_GFXIFDIS			GENMASK(9, 8)
+#define  INTCR_DEHS			BIT(27)
 
-#define VCD_HOR_AC_TIM	0x804C
-#define VCD_HOR_AC_TIM_NEW	BIT(31)
-#define VCD_HOR_AC_TIM_HAC_DIF	BIT(30)
-#define VCD_HOR_AC_TIM_VALUE	GENMASK(13, 0)
+#define INTCR2				0x60
+#define  INTCR2_GIRST2			BIT(2)
+#define  INTCR2_GIHCRST			BIT(5)
+#define  INTCR2_GIVCRST			BIT(6)
 
-#define VCD_HOR_AC_LAST	0x8050
-#define VCD_HOR_AC_LAST_VALUE	GENMASK(13, 0)
+#define INTCR3				0x9C
+#define  INTCR3_GMMAP			GENMASK(10, 8)
+#define   INTCR3_GMMAP_128MB		0
+#define   INTCR3_GMMAP_256MB		1
+#define   INTCR3_GMMAP_512MB		2
+#define   INTCR3_GMMAP_1GB		3
+#define   INTCR3_GMMAP_2GB		4
 
-#define VCD_HOR_LIN_TIM	0x8054
-#define VCD_HOR_LIN_TIM_NEW	BIT(31)
-#define VCD_HOR_LIN_TIM_HLC_DIF	BIT(30)
-#define VCD_HOR_LIN_TIM_VALUE	GENMASK(11, 0)
+#define ADDR_GMMAP_128MB		0x07000000
+#define ADDR_GMMAP_256MB		0x0F000000
+#define ADDR_GMMAP_512MB		0x1F000000
+#define ADDR_GMMAP_1GB			0x3F000000
+#define ADDR_GMMAP_2GB			0x7F000000
 
-#define VCD_HOR_LIN_LAST	0x8058
-#define VCD_HOR_LIN_LAST_VALUE	GENMASK(11, 0)
+#define GMMAP_LENGTH			0xC00000 /* Total 16MB, but 4MB preserved*/
 
-#define VCD_FIFO		0x805C
-#define  VCD_FIFO_TH	0x100350ff
-
-#define VCD_KVM_BW_PCLK 120000000UL
-
-#define GET_RES_TIMEOUT	300
-
-#define VCD_BUSY_TIMEOUT_US 50000
-
-/* ECE Register */
-#define ECE_MODULE_NAME	"ece"
-#define ECE_DDA_CTRL	0x0000
-#define ECE_DDA_CTRL_ECEEN	BIT(0)
-#define ECE_DDA_CTRL_INTEN	BIT(8)
-
-#define ECE_DDA_STS	0x0004
-#define ECE_DDA_STS_CDREADY	BIT(8)
-#define ECE_DDA_STS_ACDRDY	BIT(10)
-#define ECE_DDA_STS_FIFOSTSE	GENMASK(6,4)
-
-#define ECE_FBR_BA	0x0008
-
-#define ECE_ED_BA	0x000C
-
-#define ECE_RECT_XY	0x0010
-
-#define ECE_RECT_DIMEN	0x0014
-#define ECE_RECT_DIMEN_HLTR_OFFSET	27
-#define ECE_RECT_DIMEN_HR_OFFSET	16
-#define ECE_RECT_DIMEN_WLTR_OFFSET	11
-#define ECE_RECT_DIMEN_WR_OFFSET	0
-
-#define ECE_RESOL	0x001C
-#define ECE_RESOL_FB_LP_512	0
-#define ECE_RESOL_FB_LP_1024	1
-#define ECE_RESOL_FB_LP_2048	2
-#define ECE_RESOL_FB_LP_2560	3
-#define ECE_RESOL_FB_LP_4096	4
-
-#define ECE_HEX_CTRL	0x0040
-#define ECE_HEX_CTRL_ENCDIS	BIT(0)
-#define ECE_HEX_CTRL_ENC_GAP	0x1f00
-#define ECE_HEX_CTRL_ENC_GAP_OFFSET	8
-#define ECE_HEX_CTRL_ENC_MIN_GAP_SIZE	4
-
-#define ECE_HEX_RECT_OFFSET	0x0048
-
-
-#define ECE_DEFAULT_LP	2048
-#define ECE_BUFFER_SIZE 0x600000
-
-#define ECE_TILE_W	16
-#define ECE_TILE_H	16
-
-#define ECE_POLL_TIMEOUT_US	50000
-
-/* GCR  Register */
-#define IPSRST2 0x24
-#define  IPSRST2_VCD BIT(14)
-
-#define INTCR 0x3c
-#define  INTCR_GFXIFDIS	GENMASK(9, 8)
-#define  INTCR_LDDRB	BIT(18)
-#define  INTCR_DACOFF	BIT(15)
-#define  INTCR_DEHS	BIT(27)
-
-#define INTCR2 0x60
-#define  INTCR2_GIRST2	BIT(2)
-#define  INTCR2_GIHCRST	BIT(5)
-#define  INTCR2_GIVCRST	BIT(6)
-
-#define INTCR3 0x9c
-#define INTCR3_GMMAP_MASK	GENMASK(10, 8)
-#define INTCR3_GMMAP_128MB	0x00000000
-#define INTCR3_GMMAP_256MB	0x00000100
-#define INTCR3_GMMAP_512MB	0x00000200
-#define INTCR3_GMMAP_1GB	0x00000300
-#define INTCR3_GMMAP_2GB	0x00000400
-
-#define ADDR_GMMAP_128MB	0x07000000
-#define ADDR_GMMAP_256MB	0x0f000000
-#define ADDR_GMMAP_512MB	0x1f000000
-#define ADDR_GMMAP_1GB		0x3f000000
-#define ADDR_GMMAP_2GB		0x7f000000
-
-/* Total 16MB, but 4MB preserved*/
-#define GMMAP_LENGTH	0xC00000
-
-#define MFSEL1 0x0c
-#define  MFSEL1_DVH1SEL	BIT(27)
+#define MFSEL1 				0x0C
+#define  MFSEL1_DVH1SEL			BIT(27)
 
 /* GFXI Register */
-#define GFXI_START 0xE000
-#define GFXI_FIFO 0xE050
-#define GFXI_MASK 0x00FF
+#define DISPST				0x00
+#define  DISPST_HSCROFF 		BIT(1)
+#define  DISPST_MGAMODE 		BIT(7)
 
-#define DISPST	0
-#define  DISPST_HSCROFF BIT(1)
-#define  DISPST_MGAMODE BIT(7)
+#define HVCNTL				0x10
+#define  HVCNTL_MASK			GENMASK(7, 0)
 
-#define HVCNTL	0x10
-#define  HVCNTL_MASK	0xff
-#define HVCNTH	0x14
-#define  HVCNTH_MASK	0x07
-#define HBPCNTL	0x18
-#define  HBPCNTL_MASK	0xff
-#define HBPCNTH	0x1c
-#define  HBPCNTH_MASK	0x01
-#define VVCNTL	0x20
-#define  VVCNTL_MASK	0xff
-#define VVCNTH	0x24
-#define  VVCNTH_MASK	0x07
-#define VPBCNTL	0x28
-#define  VPBCNTL_MASK	0xff
-#define VPBCNTH	0x2C
-#define  VPBCNTH_MASK	0x01
+#define HVCNTH				0x14
+#define  HVCNTH_MASK			GENMASK(2, 0)
 
-#define GPLLINDIV	0x40
-#define  GPLLINDIV_MASK	0x3f
-#define  GPLLFBDV8_MASK	0x80
-#define  GPLLINDIV_OFFSET	0
-#define  GPLLFBDV8_OFFSET	7
+#define VVCNTL				0x20
+#define  VVCNTL_MASK			GENMASK(7, 0)
 
-#define GPLLFBDIV	0x44
-#define  GPLLFBDIV_MASK	0xff
+#define VVCNTH				0x24
+#define  VVCNTH_MASK			GENMASK(2, 0)
 
-#define GPLLST	0x48
-#define  GPLLFBDV109_MASK	0xc0
-#define  GPLLFBDV109_OFFSET	6
-#define  GPLLST_PLLOTDIV1_MASK	0x07
-#define  GPLLST_PLLOTDIV2_MASK	0x38
-#define  GPLLST_PLLOTDIV1_OFFSET	0
-#define  GPLLST_PLLOTDIV2_OFFSET	3
+#define GPLLINDIV			0x40
+#define  GPLLINDIV_MASK			GENMASK(5, 0)
+#define  GPLLINDIV_GPLLFBDV8		BIT(7)
 
-#define SWAP16(x)	cpu_to_be16((u16)(x))
-#define SWAP32(x)	cpu_to_be32((u32)(x))
+#define GPLLFBDIV			0x44
+#define  GPLLFBDIV_MASK			GENMASK(7, 0)
 
-#define to_nuvoton_video(x) container_of((x), struct nuvoton_video, v4l2_dev)
-
-struct nuvoton_format {
-	char *name;
-	__u32 fourcc;
-	int colorspace;
-	int depth;
-	u32 type;
-	u32 flags;
-};
+#define GPLLST				0x48
+#define  GPLLST_PLLOTDIV1		GENMASK(2, 0)
+#define  GPLLST_PLLOTDIV2		GENMASK(5, 3)
+#define  GPLLST_GPLLFBDV109		GENMASK(7, 6)
 
 struct nuvoton_video_addr {
 	unsigned int size;
@@ -353,6 +207,9 @@ struct nuvoton_video_buffer {
 	struct vb2_v4l2_buffer vb;
 	struct list_head link;
 };
+
+#define to_nuvoton_video_buffer(x) \
+	container_of((x), struct nuvoton_video_buffer, vb)
 
 enum {
 	VIDEO_STREAMING,
@@ -376,9 +233,6 @@ struct rect_list_info {
 	int tile_size;
 	int tile_cnt;
 };
-
-#define to_nuvoton_video_buffer(x) \
-	container_of((x), struct nuvoton_video_buffer, vb)
 
 struct nuvoton_ece {
 	struct regmap *regmap;
@@ -404,7 +258,7 @@ struct nuvoton_video {
 
 	wait_queue_head_t wait;
 	struct list_head buffers;
-	spinlock_t lock;	/* buffer list lock */
+	spinlock_t lock;		/* buffer list lock */
 	unsigned long flags;
 	unsigned int sequence;
 
@@ -424,6 +278,8 @@ struct nuvoton_video {
 	int op_cmd;
 };
 
+#define to_nuvoton_video(x) container_of((x), struct nuvoton_video, v4l2_dev)
+
 static const struct v4l2_dv_timings_cap nuvoton_video_timings_cap = {
 	.type = V4L2_DV_BT_656_1120,
 	.bt = {
@@ -434,21 +290,21 @@ static const struct v4l2_dv_timings_cap nuvoton_video_timings_cap = {
 		.min_pixelclock = 6574080, /* 640 x 480 x 24Hz */
 		.max_pixelclock = 138240000, /* 1920 x 1200 x 60Hz */
 		.standards = V4L2_DV_BT_STD_CEA861 | V4L2_DV_BT_STD_DMT |
-			V4L2_DV_BT_STD_CVT | V4L2_DV_BT_STD_GTF,
+			     V4L2_DV_BT_STD_CVT | V4L2_DV_BT_STD_GTF,
 		.capabilities = V4L2_DV_BT_CAP_PROGRESSIVE |
-			V4L2_DV_BT_CAP_REDUCED_BLANKING |
-			V4L2_DV_BT_CAP_CUSTOM,
+				V4L2_DV_BT_CAP_REDUCED_BLANKING |
+				V4L2_DV_BT_CAP_CUSTOM,
 	},
 };
 
-/* Prepend RFB FramebufferUpdate header for rectangles */
-static void nuvoton_video_ece_prepend_rect_header(u8 *addr, u16 x, u16 y, u16 w, u16 h)
+static void nuvoton_video_ece_prepend_rect_header(u8 *addr, u16 x, u16 y, u16 w,
+                                                  u16 h)
 {
-	__be16 x_pos = SWAP16(x);
-	__be16 y_pos = SWAP16(y);
-	__be16 width = SWAP16(w);
-	__be16 height = SWAP16(h);
-	__be32 encoding = SWAP32(5); // Hextile
+	__be16 x_pos = cpu_to_be16(x);
+	__be16 y_pos = cpu_to_be16(y);
+	__be16 width = cpu_to_be16(w);
+	__be16 height = cpu_to_be16(h);
+	__be32 encoding = cpu_to_be32(5); /* Hextile encoding */
 
 	memcpy(addr, &x_pos, 2);
 	memcpy(addr + 2, &y_pos, 2);
@@ -457,58 +313,50 @@ static void nuvoton_video_ece_prepend_rect_header(u8 *addr, u16 x, u16 y, u16 w,
 	memcpy(addr + 8, &encoding, 4);
 }
 
-/* Get encoded data size */
-static u32 nuvoton_video_ece_get_ed_size(struct nuvoton_video *video, u32 offset, u32 addr)
+static u32 nuvoton_video_ece_get_ed_size(struct nuvoton_video *video,
+					 u32 offset, u32 addr)
 {
-        struct regmap *ece = video->ece.regmap;
-        u32 size, gap, val;
-        void *buffer = addr + offset;
+	struct regmap *ece = video->ece.regmap;
+	u32 size, gap, val;
+	void *buffer = addr + offset;
 	int ret;
 
 	ret = regmap_read_poll_timeout(ece, ECE_DDA_STS, val,
-					(val & ECE_DDA_STS_CDREADY),
-					0, ECE_POLL_TIMEOUT_US);
+				       (val & ECE_DDA_STS_CDREADY),
+				       0, ECE_POLL_TIMEOUT_US);
 
 	if(ret) {
 		dev_warn(video->dev, "wait for ECE_DDA_STS_CDREADY timeout\n");
 		return 0;
 	}
 
-        size = (u32)readl(buffer);
+	size = readl(buffer);
 
-        regmap_read(ece, ECE_HEX_CTRL, &val);
-        gap = (val & ECE_HEX_CTRL_ENC_GAP) >> ECE_HEX_CTRL_ENC_GAP_OFFSET;
+	regmap_read(ece, ECE_HEX_CTRL, &val);
+	gap = FIELD_GET(ECE_HEX_CTRL_ENC_GAP, val);
 
-	dev_dbg(video->dev, "offset = %u, ed_size = %u, gap = %u\n", offset, size, gap);
+	dev_dbg(video->dev, "offset = %u, ed_size = %u, gap = %u\n", offset,
+		size, gap);
 
-        if (gap == 0)
-                gap = ECE_HEX_CTRL_ENC_MIN_GAP_SIZE;
-
-        return size + gap;
+	return size + gap;
 }
 
-static void nuvoton_video_ece_fifo_reset_bypass(struct nuvoton_video *video)
+static void nuvoton_video_ece_enc_rect(struct nuvoton_video *video, u32 r_off_x,
+				       u32 r_off_y, u32 r_w, u32 r_h)
 {
 	struct regmap *ece = video->ece.regmap;
-	regmap_update_bits(ece, ECE_DDA_CTRL, ECE_DDA_CTRL_ECEEN, (u32)~ECE_DDA_CTRL_ECEEN);
-	regmap_update_bits(ece, ECE_DDA_CTRL, ECE_DDA_CTRL_ECEEN, ECE_DDA_CTRL_ECEEN);
-}
-
-/* Encode the desired rectangle */
-static void nuvoton_video_ece_enc_rect(struct nuvoton_video *video,
-					u32 r_off_x, u32 r_off_y, u32 r_w, u32 r_h)
-{
-	struct regmap *ece = video->ece.regmap;
-	u32 rect_offset =
-		(r_off_y * video->bytesperline) + (r_off_x * 2);
+	u32 rect_offset = (r_off_y * video->bytesperline) + (r_off_x * 2);
 	u32 temp;
 	u32 w_tile;
 	u32 h_tile;
 	u32 w_size = ECE_TILE_W;
 	u32 h_size = ECE_TILE_H;
 
-	nuvoton_video_ece_fifo_reset_bypass(video);
-	regmap_write(ece, ECE_DDA_STS, ECE_DDA_STS_CDREADY | ECE_DDA_STS_ACDRDY);
+	regmap_update_bits(ece, ECE_DDA_CTRL, ECE_DDA_CTRL_ECEEN, 0);
+	regmap_update_bits(ece, ECE_DDA_CTRL, ECE_DDA_CTRL_ECEEN,
+			   ECE_DDA_CTRL_ECEEN);
+	regmap_write(ece, ECE_DDA_STS, ECE_DDA_STS_CDREADY |
+		     ECE_DDA_STS_ACDRDY);
 	regmap_write(ece, ECE_RECT_XY, rect_offset);
 
 	w_tile = r_w / ECE_TILE_W;
@@ -524,10 +372,10 @@ static void nuvoton_video_ece_enc_rect(struct nuvoton_video *video,
 		h_size = r_h % ECE_TILE_H;
 	}
 
-	temp = ((w_size - 1) << ECE_RECT_DIMEN_WLTR_OFFSET)
-		| ((h_size - 1) << ECE_RECT_DIMEN_HLTR_OFFSET)
-		| ((w_tile - 1) << ECE_RECT_DIMEN_WR_OFFSET)
-		| ((h_tile - 1) << ECE_RECT_DIMEN_HR_OFFSET);
+	temp = FIELD_PREP(ECE_RECT_DIMEN_WLTR, w_size - 1) |
+	       FIELD_PREP(ECE_RECT_DIMEN_HLTR, h_size - 1) |
+	       FIELD_PREP(ECE_RECT_DIMEN_WR, w_tile - 1) |
+	       FIELD_PREP(ECE_RECT_DIMEN_HR, h_tile - 1);
 
 	regmap_write(ece, ECE_RECT_DIMEN, temp);
 }
@@ -538,49 +386,49 @@ static u32 nuvoton_video_ece_read_rect_offset(struct nuvoton_video *video)
 	u32 offset;
 
 	regmap_read(ece, ECE_HEX_RECT_OFFSET, &offset);
-	return offset & 0x003fffff;
+	return FIELD_GET(ECE_HEX_RECT_OFFSET_MASK, offset);
 }
 
-/* Set the line pitch (in bytes) for the frame buffers. */
-/* Can be on of those values: 512, 1024, 2048, 2560 or 4096 bytes */
+/*
+ * Set the line pitch (in bytes) for the frame buffers.
+ * Can be on of those values: 512, 1024, 2048, 2560 or 4096 bytes.
+ */
 static void nuvoton_video_ece_set_lp(struct nuvoton_video *video, u32 pitch)
 {
-        u32 lp;
-        struct regmap *ece = video->ece.regmap;
+	u32 lp;
+	struct regmap *ece = video->ece.regmap;
 
-        switch (pitch) {
-        case 512:
-                lp = ECE_RESOL_FB_LP_512;
-                break;
-        case 1024:
-                lp = ECE_RESOL_FB_LP_1024;
-                break;
-        case 2048:
-                lp = ECE_RESOL_FB_LP_2048;
-                break;
-        case 2560:
-                lp = ECE_RESOL_FB_LP_2560;
-                break;
-        case 4096:
-                lp = ECE_RESOL_FB_LP_4096;
-                break;
-        default:
-                return;
-        }
+	switch (pitch) {
+	case 512:
+		lp = ECE_RESOL_FB_LP_512;
+		break;
+	case 1024:
+		lp = ECE_RESOL_FB_LP_1024;
+		break;
+	case 2048:
+		lp = ECE_RESOL_FB_LP_2048;
+		break;
+	case 2560:
+		lp = ECE_RESOL_FB_LP_2560;
+		break;
+	case 4096:
+		lp = ECE_RESOL_FB_LP_4096;
+		break;
+	default:
+		return;
+	}
 
-        regmap_write(ece, ECE_RESOL, lp);
+	regmap_write(ece, ECE_RESOL, lp);
 }
 
-/* Set the frame buffer base address */
-static void nuvoton_video_ece_set_fb_addr(struct nuvoton_video *video, u32 buffer)
+static void nuvoton_video_ece_set_fb_addr(struct nuvoton_video *video,
+					  u32 buffer)
 {
 	struct regmap *ece = video->ece.regmap;
-	struct regmap *vcd = video->vcd_regmap;
 
 	regmap_write(ece, ECE_FBR_BA, buffer);
 }
 
-/* Set the encoded data base address */
 static void nuvoton_video_ece_set_enc_dba(struct nuvoton_video *video, u32 addr)
 {
 	struct regmap *ece = video->ece.regmap;
@@ -595,24 +443,20 @@ static void nuvoton_video_ece_clear_rect_offset(struct nuvoton_video *video)
 	regmap_write(ece, ECE_HEX_RECT_OFFSET, 0);
 }
 
-/* Stop and reset the ECE state machine */
 static void nuvoton_video_ece_reset(struct nuvoton_video *video)
 {
 	struct regmap *ece = video->ece.regmap;
 
-	regmap_update_bits(ece,
-				ECE_DDA_CTRL, ECE_DDA_CTRL_ECEEN, (u32)~ECE_DDA_CTRL_ECEEN);
-	regmap_update_bits(ece,
-				ECE_HEX_CTRL, ECE_HEX_CTRL_ENCDIS, ECE_HEX_CTRL_ENCDIS);
-	regmap_update_bits(ece,
-				ECE_DDA_CTRL, ECE_DDA_CTRL_ECEEN, ECE_DDA_CTRL_ECEEN);
-	regmap_update_bits(ece,
-				ECE_HEX_CTRL, ECE_HEX_CTRL_ENCDIS, (u32)~ECE_HEX_CTRL_ENCDIS);
+	regmap_update_bits(ece, ECE_DDA_CTRL, ECE_DDA_CTRL_ECEEN, 0);
+	regmap_update_bits(ece, ECE_HEX_CTRL, ECE_HEX_CTRL_ENCDIS,
+			   ECE_HEX_CTRL_ENCDIS);
+	regmap_update_bits(ece, ECE_DDA_CTRL, ECE_DDA_CTRL_ECEEN,
+			   ECE_DDA_CTRL_ECEEN);
+	regmap_update_bits(ece, ECE_HEX_CTRL, ECE_HEX_CTRL_ENCDIS, 0);
 
 	nuvoton_video_ece_clear_rect_offset(video);
 }
 
-/* Reset ECE IP */
 static void nuvoton_video_ece_ip_reset(struct nuvoton_video *video)
 {
 	reset_control_assert(video->ece.reset);
@@ -621,28 +465,22 @@ static void nuvoton_video_ece_ip_reset(struct nuvoton_video *video)
 	msleep(100);
 }
 
-/* Initialise the ECE block and interface library */
 static int nuvoton_video_ece_init(struct nuvoton_video *video)
 {
-	struct regmap *vcd = video->vcd_regmap;
-
 	nuvoton_video_ece_ip_reset(video);
 	nuvoton_video_ece_reset(video);
 
 	return 0;
 }
 
-/* Disable the ECE block*/
 static int nuvoton_video_ece_stop(struct nuvoton_video *video)
 {
 	struct regmap *ece = video->ece.regmap;
 
-	regmap_update_bits(ece,
-				ECE_DDA_CTRL, ECE_DDA_CTRL_ECEEN, (u32)~ECE_DDA_CTRL_ECEEN);
-	regmap_update_bits(ece,
-				ECE_DDA_CTRL, ECE_DDA_CTRL_INTEN, (u32)~ECE_DDA_CTRL_INTEN);
-	regmap_update_bits(ece,
-				ECE_HEX_CTRL, ECE_HEX_CTRL_ENCDIS, ECE_HEX_CTRL_ENCDIS);
+	regmap_update_bits(ece, ECE_DDA_CTRL, ECE_DDA_CTRL_ECEEN, 0);
+	regmap_update_bits(ece, ECE_DDA_CTRL, ECE_DDA_CTRL_INTEN, 0);
+	regmap_update_bits(ece, ECE_HEX_CTRL, ECE_HEX_CTRL_ENCDIS,
+			   ECE_HEX_CTRL_ENCDIS);
 	nuvoton_video_ece_clear_rect_offset(video);
 
 	return 0;
@@ -650,13 +488,14 @@ static int nuvoton_video_ece_stop(struct nuvoton_video *video)
 
 static bool nuvoton_video_alloc_buf(struct nuvoton_video *video,
 				    struct nuvoton_video_addr *addr,
-				  unsigned int size)
+				    unsigned int size)
 {
 	if (size > VCD_MAX_SRC_BUFFER_SIZE)
 		size = VCD_MAX_SRC_BUFFER_SIZE;
 
 	addr->virt = dma_alloc_coherent(video->dev, size, &addr->dma,
 					GFP_KERNEL);
+
 	if (!addr->virt)
 		return false;
 
@@ -679,7 +518,7 @@ static void nuvoton_video_free_diff_table(struct nuvoton_video *video)
 	struct rect_list *tmp;
 	int i;
 
-	for (i = 0 ; i < video->num_buffers ; i++) {
+	for (i = 0; i < video->num_buffers; i++) {
 		head = &video->list[i];
 		list_for_each_safe(pos, nx, head) {
 			tmp = list_entry(pos, struct rect_list, list);
@@ -691,9 +530,8 @@ static void nuvoton_video_free_diff_table(struct nuvoton_video *video)
 	}
 }
 
-static int
-nuvoton_video_add_rect(struct nuvoton_video *video,
-		       int index, u32 x, u32 y, u32 w, u32 h)
+static int nuvoton_video_add_rect(struct nuvoton_video *video, int index,
+				  u32 x, u32 y, u32 w, u32 h)
 {
 	struct list_head *head = &video->list[index];
 	struct rect_list *list = NULL;
@@ -728,20 +566,17 @@ static void nuvoton_video_merge_rect(struct nuvoton_video *video,
 		list_add_tail(&list->list, head);
 		video->rect_cnt++;
 	} else {
-		if ((r->left ==
-		      (f->left + f->width)) &&
-		      r->top == f->top) {
+		if ((r->left == (f->left + f->width)) && r->top == f->top) {
 			f->width += r->width;
 			kfree(list);
-		} else if ((r->top ==
-			     (f->top + f->height)) &&
-			    (r->left == f->left)) {
+		} else if ((r->top == (f->top + f->height)) &&
+			   (r->left == f->left)) {
 			f->height += r->height;
 			kfree(list);
 		} else if (((r->top > f->top) &&
-			    (r->top < (f->top + f->height))) &&
+			   (r->top < (f->top + f->height))) &&
 			   ((r->left > f->left) &&
-			    (r->left < (f->left + f->width)))) {
+			   (r->left < (f->left + f->width)))) {
 			kfree(list);
 		} else {
 			list_add_tail(&list->list, head);
@@ -751,8 +586,8 @@ static void nuvoton_video_merge_rect(struct nuvoton_video *video,
 	}
 }
 
-static struct rect_list *
-nuvoton_video_new_rect(struct nuvoton_video *video, int offset, int index)
+static struct rect_list *nuvoton_video_new_rect(struct nuvoton_video *video,
+						int offset, int index)
 {
 	struct v4l2_bt_timings *act = &video->active_timings;
 	struct rect_list *list = NULL;
@@ -770,7 +605,7 @@ nuvoton_video_new_rect(struct nuvoton_video *video, int offset, int index)
 	r->height = RECT_H;
 	if ((r->left + RECT_W) > act->width)
 		r->width = act->width - r->left;
-	if ((r->top  + RECT_H) > act->height)
+	if ((r->top + RECT_H) > act->height)
 		r->height = act->height - r->top;
 
 	return list;
@@ -799,14 +634,15 @@ static int nuvoton_video_build_table(struct nuvoton_video *video,
 	u32 value;
 	struct regmap *vcd = video->vcd_regmap;
 
-	for (j = 0 ; j < info->offset_perline ; j += 4) {
+	for (j = 0; j < info->offset_perline; j += 4) {
 		regmap_read(vcd, VCD_DIFF_TBL + (j + i), &value);
 
 		DECLARE_BITMAP(bitmap, BITMAP_SIZE);
 		bitmap_from_arr32(bitmap, &value, BITMAP_SIZE);
 
 		for_each_set_bit(bit, bitmap, BITMAP_SIZE) {
-			ret = nuvoton_video_find_rect(video, info, bit + (j << 3));
+			ret = nuvoton_video_find_rect(video, info,
+						      bit + (j << 3));
 			if (ret < 0)
 				return ret;
 		}
@@ -835,8 +671,7 @@ static int nuvoton_video_get_rect_list(struct nuvoton_video *video, int index)
 	if (mod != 0)
 		info.tile_perrow += 1;
 
-	info.tile_size =
-		info.tile_perrow * info.tile_perline;
+	info.tile_size = info.tile_perrow * info.tile_perline;
 
 	info.offset_perline = info.tile_perline >> 5;
 	mod = info.tile_perline % 32;
@@ -871,9 +706,8 @@ static u32 nuvoton_video_hres(struct nuvoton_video *video)
 
 	regmap_read(gfxi, HVCNTH, &hvcnth);
 	regmap_read(gfxi, HVCNTL, &hvcntl);
-
-	apb_hor_res = (((hvcnth & HVCNTH_MASK) << 8)
-		+ (hvcntl & HVCNTL_MASK) + 1);
+	apb_hor_res = (((hvcnth & HVCNTH_MASK) << 8) +
+		       (hvcntl & HVCNTL_MASK) + 1);
 
 	return apb_hor_res;
 }
@@ -886,8 +720,7 @@ static u32 nuvoton_video_vres(struct nuvoton_video *video)
 	regmap_read(gfxi, VVCNTH, &vvcnth);
 	regmap_read(gfxi, VVCNTL, &vvcntl);
 
-	apb_ver_res = (((vvcnth & VVCNTH_MASK) << 8)
-		+ (vvcntl & VVCNTL_MASK));
+	apb_ver_res = (((vvcnth & VVCNTH_MASK) << 8) + (vvcntl & VVCNTL_MASK));
 
 	return apb_ver_res;
 }
@@ -897,13 +730,13 @@ static int nuvoton_video_ready(struct nuvoton_video *video)
 	struct regmap *vcd = video->vcd_regmap;
 	u32 lp, res;
 
-	regmap_write(vcd, VCD_FB_LP, 0xffffffff);
-	regmap_write(vcd, VCD_CAP_RES, 0xffffffff);
+	regmap_write(vcd, VCD_FB_LP, 0xFFFFFFFF);
+	regmap_write(vcd, VCD_CAP_RES, 0xFFFFFFFF);
 
 	regmap_read(vcd, VCD_FB_LP, &lp);
 	regmap_read(vcd, VCD_CAP_RES, &res);
 
-	if ((lp != 0xfe00fe00) || (res != 0x7ff07ff)) {
+	if ((lp != 0xFE00FE00) || (res != 0x7FF07FF)) {
 		dev_err(video->dev, "VCD module is not ready\n");
 		return -ENODEV;
 	}
@@ -911,45 +744,42 @@ static int nuvoton_video_ready(struct nuvoton_video *video)
 	return 0;
 }
 
-static int
-nuvoton_video_capres(struct nuvoton_video *video, u32 hor_res, u32 vert_res)
+static int nuvoton_video_capres(struct nuvoton_video *video, u32 hor_res,
+				u32 vert_res)
 {
 	struct regmap *vcd = video->vcd_regmap;
-	u32 res = (vert_res & VCD_CAPRES_MASK)
-		| ((hor_res & VCD_CAPRES_MASK) << 16);
-	u32 cap_res;
+	u32 res, cap_res;
 
 	if (hor_res > MAX_WIDTH || vert_res > MAX_HEIGHT)
 		return -EINVAL;
 
+	res = FIELD_PREP(VCD_CAP_RES_VERT_RES, vert_res) |
+	      FIELD_PREP(VCD_CAP_RES_HOR_RES, hor_res);
+
 	regmap_write(vcd, VCD_CAP_RES, res);
 	regmap_read(vcd, VCD_CAP_RES, &cap_res);
 
-	/* Read back the register to check that the values were valid */
-	if (cap_res !=  res)
+	if (cap_res != res)
 		return -EINVAL;
 
 	return 0;
 }
 
-static void
-nuvoton_video_vcd_reset(struct nuvoton_video *video)
+static void nuvoton_video_vcd_reset(struct nuvoton_video *video)
 {
 	struct regmap *vcd = video->vcd_regmap;
 	u32 stat;
 	int ret;
 
-	regmap_update_bits(vcd, VCD_MODE, VCD_MODE_VCDE,
-			     ~VCD_MODE_VCDE);
+	regmap_update_bits(vcd, VCD_MODE, VCD_MODE_VCDE, 0);
 
-	regmap_update_bits(vcd, VCD_MODE, VCD_MODE_IDBC,
-			     ~VCD_MODE_IDBC);
+	regmap_update_bits(vcd, VCD_MODE, VCD_MODE_IDBC, 0);
 
 	regmap_update_bits(vcd, VCD_CMD, VCD_CMD_RST, VCD_CMD_RST);
 
 	ret = regmap_read_poll_timeout(vcd, VCD_STAT, stat,
-					(stat & VCD_STAT_DONE),
-					0, ECE_POLL_TIMEOUT_US);
+				       (stat & VCD_STAT_DONE), 0,
+				       ECE_POLL_TIMEOUT_US);
 
 	if (ret) {
 		dev_warn(video->dev, "wait for VCD_STAT_DONE timeout\n");
@@ -958,27 +788,20 @@ nuvoton_video_vcd_reset(struct nuvoton_video *video)
 
 	regmap_write(vcd, VCD_STAT, VCD_STAT_CLEAR);
 
-	regmap_update_bits(vcd, VCD_MODE, VCD_MODE_VCDE,
-			     VCD_MODE_VCDE);
+	regmap_update_bits(vcd, VCD_MODE, VCD_MODE_VCDE, VCD_MODE_VCDE);
 
-	regmap_update_bits(vcd, VCD_MODE, VCD_MODE_IDBC,
-			     VCD_MODE_IDBC);
-
+	regmap_update_bits(vcd, VCD_MODE, VCD_MODE_IDBC, VCD_MODE_IDBC);
 }
 
 static int nuvoton_video_reset(struct nuvoton_video *video)
 {
 	struct regmap *gcr = video->gcr_regmap;
 
-	/* Active graphic reset */
-	regmap_update_bits(
-		gcr, INTCR2, INTCR2_GIRST2, INTCR2_GIRST2);
+	regmap_update_bits(gcr, INTCR2, INTCR2_GIRST2, INTCR2_GIRST2);
 
 	nuvoton_video_vcd_reset(video);
 
-	/* Inactive graphic reset */
-	regmap_update_bits(
-		gcr, INTCR2, INTCR2_GIRST2, ~INTCR2_GIRST2);
+	regmap_update_bits(gcr, INTCR2, INTCR2_GIRST2, 0);
 
 	return 0;
 }
@@ -991,17 +814,10 @@ static void nuvoton_video_kvm_bw(struct nuvoton_video *video, u8 bandwidth)
 		bandwidth = 1;
 
 	if (bandwidth)
-		regmap_update_bits(
-			vcd,
-			VCD_MODE,
-			VCD_MODE_KVM_BW_SET,
-			VCD_MODE_KVM_BW_SET);
+		regmap_update_bits(vcd, VCD_MODE, VCD_MODE_KVM_BW_SET,
+				   VCD_MODE_KVM_BW_SET);
 	else
-		regmap_update_bits(
-			vcd,
-			VCD_MODE,
-			VCD_MODE_KVM_BW_SET,
-			~VCD_MODE_KVM_BW_SET);
+		regmap_update_bits(vcd, VCD_MODE, VCD_MODE_KVM_BW_SET, 0);
 }
 
 static u32 nuvoton_video_pclk(struct nuvoton_video *video)
@@ -1012,17 +828,16 @@ static u32 nuvoton_video_pclk(struct nuvoton_video *video)
 	u8 gpllst_pllotdiv1, gpllst_pllotdiv2;
 
 	regmap_read(gfxi, GPLLST, &tmp);
-	gpllfbdv109 = (tmp & GPLLFBDV109_MASK) >> GPLLFBDV109_OFFSET;
-	gpllst_pllotdiv1 = tmp & GPLLST_PLLOTDIV1_MASK;
-	gpllst_pllotdiv2 =
-		(tmp & GPLLST_PLLOTDIV2_MASK) >> GPLLST_PLLOTDIV2_OFFSET;
+	gpllfbdv109 = FIELD_GET(GPLLST_GPLLFBDV109, tmp);
+	gpllst_pllotdiv1 = FIELD_GET(GPLLST_PLLOTDIV1, tmp);
+	gpllst_pllotdiv2 = FIELD_GET(GPLLST_PLLOTDIV2, tmp);
 
 	regmap_read(gfxi, GPLLINDIV, &tmp);
-	gpllfbdv8 = (tmp & GPLLFBDV8_MASK) >> GPLLFBDV8_OFFSET;
-	gpllindiv = (tmp & GPLLINDIV_MASK);
+	gpllfbdv8 = FIELD_GET(GPLLINDIV_GPLLFBDV8, tmp);
+	gpllindiv = FIELD_GET(GPLLINDIV_MASK, tmp);
 
 	regmap_read(gfxi, GPLLFBDIV, &tmp);
-	gpllfbdiv = tmp & GPLLFBDIV_MASK;
+	gpllfbdiv = FIELD_GET(GPLLFBDIV_MASK, tmp);
 
 	pllfbdiv = (512 * gpllfbdv109 + 256 * gpllfbdv8 + gpllfbdiv);
 	pllinotdiv = (gpllindiv * gpllst_pllotdiv1 * gpllst_pllotdiv2);
@@ -1039,33 +854,35 @@ static int nuvoton_video_get_bpp(struct nuvoton_video *video)
 
 	regmap_read(vcd, VCD_MODE, &mode);
 
-	color_cnvr = (mode & VCD_MODE_COLOR_CNVRT) >>
-		VCD_MODE_COLOR_CNVRT_OFFSET;
+	color_cnvr = FIELD_GET(VCD_MODE_COLOR_CNVRT, mode);
 
 	switch (color_cnvr) {
-	case VCD_MODE_COLOR_NORM:
+	case VCD_MODE_COLOR_CNVRT_NO_CNVRT:
 		return 2;
-	case VCD_MODE_COLOR_222:
-	case VCD_MODE_COLOR_666:
+	case VCD_MODE_COLOR_CNVRT_RGB_222:
+	case VCD_MODE_COLOR_CNVRT_666_MODE:
 		return 1;
-	case VCD_MODE_COLOR_888:
+	case VCD_MODE_COLOR_CNVRT_RGB_888:
 		return 4;
 	}
 	return 0;
 }
 
-static void
-nuvoton_video_set_linepitch(struct nuvoton_video *video, u32 linebytes)
+/*
+ * Pitch must be a power of 2, >= linebytes,
+ * at least 512, and no more than 4096.
+ */
+static void nuvoton_video_set_linepitch(struct nuvoton_video *video,
+					u32 linebytes)
 {
 	struct regmap *vcd = video->vcd_regmap;
-	/* Pitch must be a power of 2, >= linebytes,*/
-	/* at least 512, and no more than 4096. */
 	u32 pitch = MIN_LP;
 
 	while ((pitch < linebytes) && (pitch < MAX_LP))
 		pitch *= 2;
 
-	regmap_write(vcd, VCD_FB_LP, (pitch << VCD_FBB_LP_OFFSET) | pitch);
+	regmap_write(vcd, VCD_FB_LP, FIELD_PREP(VCD_FBA_LP, pitch) |
+		     FIELD_PREP(VCD_FBB_LP, pitch));
 }
 
 static u32 nuvoton_video_get_linepitch(struct nuvoton_video *video)
@@ -1075,18 +892,7 @@ static u32 nuvoton_video_get_linepitch(struct nuvoton_video *video)
 
 	regmap_read(vcd, VCD_FB_LP, &linepitch);
 
-	return linepitch & VCD_FB_LP_MASK;
-}
-
-static u32 nuvoton_video_is_busy(struct nuvoton_video *video)
-{
-	struct regmap *vcd = video->vcd_regmap;
-	u32 stat;
-
-	regmap_read(vcd, VCD_STAT, &stat);
-	stat &= VCD_STAT_BUSY;
-
-	return (stat == VCD_STAT_BUSY);
+	return FIELD_GET(VCD_FBA_LP, linepitch);
 }
 
 static int nuvoton_video_command(struct nuvoton_video *video, u32 value)
@@ -1094,16 +900,13 @@ static int nuvoton_video_command(struct nuvoton_video *video, u32 value)
 	struct regmap *vcd = video->vcd_regmap;
 	u32 cmd;
 
-	/* Clear the status flags that could be set by this command */
 	regmap_write(vcd, VCD_STAT, VCD_STAT_CLEAR);
 
 	regmap_read(vcd, VCD_CMD, &cmd);
-
-	cmd &= ~VCD_CMD_OP_MASK;
-	cmd |= (value << VCD_CMD_OP_OFFSET);
+	cmd |= FIELD_PREP(VCD_CMD_OPERATION, value);
 
 	regmap_write(vcd, VCD_CMD, cmd);
-	regmap_write(vcd, VCD_CMD, cmd | VCD_CMD_GO);
+	regmap_update_bits(vcd, VCD_CMD, VCD_CMD_GO, VCD_CMD_GO);
 	video->op_cmd = value;
 
 	return 0;
@@ -1115,21 +918,20 @@ static int nuvoton_video_init_reg(struct nuvoton_video *video)
 	struct regmap *vcd = video->vcd_regmap;
 
 	/* Selects Data Enable*/
-	regmap_update_bits(gcr, INTCR, INTCR_DEHS, ~INTCR_DEHS);
+	regmap_update_bits(gcr, INTCR, INTCR_DEHS, 0);
 
 	/* Enable display of KVM GFX and access to memory */
-	regmap_update_bits(gcr, INTCR, INTCR_GFXIFDIS, ~INTCR_GFXIFDIS);
+	regmap_update_bits(gcr, INTCR, INTCR_GFXIFDIS, 0);
 
 	/* Active Vertical/Horizontal Counters Reset */
-	regmap_update_bits(gcr, INTCR2,
-			   INTCR2_GIHCRST | INTCR2_GIVCRST,
-			INTCR2_GIHCRST | INTCR2_GIVCRST);
+	regmap_update_bits(gcr, INTCR2, INTCR2_GIHCRST | INTCR2_GIVCRST,
+			   INTCR2_GIHCRST | INTCR2_GIVCRST);
 
 	/* Select KVM GFX input */
-	regmap_update_bits(gcr, MFSEL1, MFSEL1_DVH1SEL, ~MFSEL1_DVH1SEL);
+	regmap_update_bits(gcr, MFSEL1, MFSEL1_DVH1SEL, 0);
 
 	if (nuvoton_video_ready(video))
-		return	-ENODEV;
+		return -ENODEV;
 
 	/* Reset VCD module */
 	nuvoton_video_reset(video);
@@ -1139,18 +941,16 @@ static int nuvoton_video_init_reg(struct nuvoton_video *video)
 
 	/* Set video mode */
 	regmap_update_bits(vcd, VCD_MODE, 0xFFFFFFFF,
-			     VCD_MODE_VCDE | VCD_MODE_CM_565 |
+			   VCD_MODE_VCDE | VCD_MODE_CM565 |
 			   VCD_MODE_IDBC | VCD_MODE_KVM_BW_SET);
 
-	regmap_update_bits(vcd, VCD_RCHG, VCD_RCHG_TIM_PRSCL,
-			     0x0f << VCD_RCHG_TIM_PRSCL_OFFSET | 0x7 << VCD_RCHG_IG_CHG2_OFFSET);
+	regmap_write(vcd, VCD_RCHG, FIELD_PREP(VCD_RCHG_TIM_PRSCL, 0xF));
 
 	return 0;
 }
 
 static int nuvoton_video_start_frame(struct nuvoton_video *video)
 {
-	dma_addr_t dma_addr;
 	unsigned long flags;
 	struct nuvoton_video_buffer *buf;
 	struct regmap *vcd = video->vcd_regmap;
@@ -1159,16 +959,16 @@ static int nuvoton_video_start_frame(struct nuvoton_video *video)
 
 	dev_dbg(video->dev, "%s\n", __func__);
 
-	if (video->v4l2_input_status){
-		dev_info(video->dev, "No video signal; skip capture frame\n");
+	if (video->v4l2_input_status) {
+		dev_dbg(video->dev, "No video signal; skip capture frame\n");
 		return 0;
 	}
 
 	ret = regmap_read_poll_timeout(vcd, VCD_STAT, val,
-					!(val & VCD_STAT_BUSY),
-					1000, VCD_BUSY_TIMEOUT_US);
+				       !(val & VCD_STAT_BUSY), 1000,
+				       VCD_BUSY_TIMEOUT_US);
 
-	if(ret) {
+	if (ret) {
 		dev_err(video->dev, "wait for VCD_STAT_BUSY timeout\n");
 		return -EBUSY;
 	}
@@ -1186,10 +986,10 @@ static int nuvoton_video_start_frame(struct nuvoton_video *video)
 	spin_unlock_irqrestore(&video->lock, flags);
 
 	nuvoton_video_vcd_reset(video);
-	regmap_update_bits(vcd, VCD_INTE, VCD_INTE_DONE_IE, VCD_INTE_DONE_IE);
 
-	regmap_update_bits(vcd, VCD_INTE, VCD_INTE_IFOT_IE, VCD_INTE_IFOT_IE);
-	regmap_update_bits(vcd, VCD_INTE, VCD_INTE_IFOR_IE, VCD_INTE_IFOR_IE);
+	regmap_update_bits(vcd, VCD_INTE, VCD_INTE_DONE_IE | VCD_INTE_IFOT_IE |
+			   VCD_INTE_IFOR_IE, VCD_INTE_DONE_IE |
+			   VCD_INTE_IFOT_IE | VCD_INTE_IFOR_IE);
 
 	nuvoton_video_command(video, video->ctrl_cmd);
 
@@ -1211,24 +1011,30 @@ static void nuvoton_video_bufs_done(struct nuvoton_video *video,
 
 static void nuvoton_video_get_diff_rect(struct nuvoton_video *video, int index)
 {
-        u32 width = video->active_timings.width;
-        u32 height = video->active_timings.height;
+	u32 width = video->active_timings.width;
+	u32 height = video->active_timings.height;
 
-        if (video->op_cmd != VCD_CMD_OP_CAPTURE) {
-                video->rect_cnt = 0;
-                nuvoton_video_get_rect_list(video, index);
-                video->rect[index] = video->rect_cnt;
-        } else {
-                video->rect[index]  =
-                        nuvoton_video_add_rect(video, index, 0, 0, width, height);
-        }
+	if (video->op_cmd != VCD_CMD_OPERATION_CAPTURE) {
+		video->rect_cnt = 0;
+		nuvoton_video_get_rect_list(video, index);
+		video->rect[index] = video->rect_cnt;
+	} else {
+		video->rect[index] = nuvoton_video_add_rect(video, index, 0, 0,
+							    width, height);
+	}
 }
 
 static irqreturn_t nuvoton_video_irq(int irq, void *arg)
 {
 	struct nuvoton_video *video = arg;
 	struct regmap *vcd = video->vcd_regmap;
-	u32 status;
+	struct nuvoton_video_buffer *buf;
+	struct rect_list *rect_list;
+	struct v4l2_rect *rect;
+	u32 status, ed_offset, ed_size, total_size;
+	void *addr;
+	dma_addr_t vb_dma_addr;
+	int index;
 
 	regmap_read(vcd, VCD_STAT, &status);
 	dev_dbg(video->dev, "VCD status 0x%x\n", status);
@@ -1236,78 +1042,75 @@ static irqreturn_t nuvoton_video_irq(int irq, void *arg)
 	regmap_write(vcd, VCD_INTE, 0);
 	regmap_write(vcd, VCD_STAT, VCD_STAT_CLEAR);
 
-	/* Exit IRQ handler since video is stopped */
 	if (test_bit(VIDEO_STOPPED, &video->flags) ||
-		!test_bit(VIDEO_STREAMING, &video->flags)) {
+	    !test_bit(VIDEO_STREAMING, &video->flags)) {
 		clear_bit(VIDEO_FRAME_INPRG, &video->flags);
 		return IRQ_NONE;
 	}
 
 	if (status & VCD_STAT_DONE) {
-		struct nuvoton_video_buffer *buf;
-		u32 frame_size;
-
 		spin_lock(&video->lock);
 		buf = list_first_entry_or_null(&video->buffers,
-					       struct nuvoton_video_buffer, link);
-		if (buf) {
-			void *addr = vb2_plane_vaddr(&buf->vb.vb2_buf, 0);
-			dma_addr_t vb_dma_addr = vb2_dma_contig_plane_dma_addr(&buf->vb.vb2_buf, 0);
-			int index = buf->vb.vb2_buf.index;
-			struct rect_list *rect_list;
-			struct v4l2_rect *rect;
-			u32 ed_offset = 0;
-			u32 total_size = 0;
-			u32 copy_size = 0;
+					       struct nuvoton_video_buffer,
+					       link);
 
-			if (addr) {
-				nuvoton_video_ece_reset(video);
-				nuvoton_video_ece_clear_rect_offset(video);
-
-				/* set frame buffer adress for ECE */
-				nuvoton_video_ece_set_fb_addr(video, video->src.dma);
-
-				/* set ECE output adress to video buffer */
-				nuvoton_video_ece_set_enc_dba(video, vb_dma_addr);
-
-				nuvoton_video_ece_set_lp(video, video->bytesperline);
-				nuvoton_video_get_diff_rect(video, index);
-
-				list_for_each_entry(rect_list, &video->list[index], list) {
-					rect = &rect_list->clip.c;
-
-					ed_offset = nuvoton_video_ece_read_rect_offset(video);
-					if ((ed_offset + (rect->width * rect->height * 2) + 12) >= VCD_MAX_SRC_BUFFER_SIZE) {
-						dev_warn(video->dev, "ECE may reach beyond memory region\n");
-						return IRQ_HANDLED;
-					}
-
-					/* encode rect */
-					nuvoton_video_ece_enc_rect(video, rect->left, rect->top, rect->width, rect->height);
-					copy_size = nuvoton_video_ece_get_ed_size(video, ed_offset, addr);
-
-					/* prepend RFB FramebufferUpdate header */
-					nuvoton_video_ece_prepend_rect_header(addr + ed_offset, rect->left, rect->top, rect->width, rect->height);
-
-					total_size += copy_size;
-				}
-
-				vb2_set_plane_payload(&buf->vb.vb2_buf, 0, total_size);
-				buf->vb.vb2_buf.timestamp = ktime_get_ns();
-				buf->vb.sequence = video->sequence++;
-				buf->vb.field = V4L2_FIELD_NONE;
-				vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
-				list_del(&buf->link);
-			}
+		if(!buf) {
+			spin_unlock(&video->lock);
+			clear_bit(VIDEO_FRAME_INPRG, &video->flags);
+			return IRQ_NONE;
 		}
+
+		addr = vb2_plane_vaddr(&buf->vb.vb2_buf, 0);
+		vb_dma_addr = vb2_dma_contig_plane_dma_addr(&buf->vb.vb2_buf, 0);
+		index = buf->vb.vb2_buf.index;
+
+		nuvoton_video_ece_reset(video);
+		nuvoton_video_ece_clear_rect_offset(video);
+
+		nuvoton_video_ece_set_fb_addr(video, video->src.dma);
+
+		/* Set base address of encoded data to video buffer */
+		nuvoton_video_ece_set_enc_dba(video, vb_dma_addr);
+
+		nuvoton_video_ece_set_lp(video, video->bytesperline);
+		nuvoton_video_get_diff_rect(video, index);
+
+		total_size = 0;
+
+		list_for_each_entry(rect_list, &video->list[index], list) {
+			rect = &rect_list->clip.c;
+			ed_offset = nuvoton_video_ece_read_rect_offset(video);
+
+			nuvoton_video_ece_enc_rect(video, rect->left,
+						   rect->top, rect->width,
+						   rect->height);
+			ed_size = nuvoton_video_ece_get_ed_size(video,
+								  ed_offset,
+								  addr);
+
+			nuvoton_video_ece_prepend_rect_header(addr + ed_offset,
+							      rect->left,
+							      rect->top,
+							      rect->width,
+							      rect->height);
+
+			total_size += ed_size;
+		}
+
+		vb2_set_plane_payload(&buf->vb.vb2_buf, 0, total_size);
+		buf->vb.vb2_buf.timestamp = ktime_get_ns();
+		buf->vb.sequence = video->sequence++;
+		buf->vb.field = V4L2_FIELD_NONE;
+		vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+		list_del(&buf->link);
+
 		spin_unlock(&video->lock);
 
 		clear_bit(VIDEO_FRAME_INPRG, &video->flags);
 	}
 
-	/* Handle VCD FIFO overrun or over threshold */
 	if (status & VCD_STAT_IFOR || status & VCD_STAT_IFOT) {
-		dev_warn(video->dev, "VCD FIFO overrun or over threshold\n");
+		dev_warn(video->dev, "VCD FIFO overrun or over thresholds\n");
 		nuvoton_video_reset(video);
 		nuvoton_video_start_frame(video);
 	}
@@ -1322,9 +1125,9 @@ static void nuvoton_video_clear_gmmap(struct nuvoton_video *video)
 	void __iomem *baseptr;
 
 	regmap_read(gcr, INTCR3, &intcr3);
-	gmmap = (intcr3 & INTCR3_GMMAP_MASK);
+	gmmap = FIELD_GET(INTCR3_GMMAP, intcr3);
 
-	switch (gmmap){
+	switch (gmmap) {
 	case INTCR3_GMMAP_128MB:
 		baseptr = ioremap(ADDR_GMMAP_128MB, GMMAP_LENGTH);
 		break;
@@ -1356,8 +1159,7 @@ static void nuvoton_video_get_resolution(struct nuvoton_video *video)
 	det->width = nuvoton_video_hres(video);
 	det->height = nuvoton_video_vres(video);
 
-	if (act->width != det->width ||
-	    act->height != det->height) {
+	if (act->width != det->width || act->height != det->height) {
 		dev_dbg(video->dev, "resolution changed;\n");
 
 		nuvoton_video_bufs_done(video, VB2_BUF_STATE_ERROR);
@@ -1368,14 +1170,16 @@ static void nuvoton_video_get_resolution(struct nuvoton_video *video)
 			u32 dispst;
 
 			if (test_bit(VIDEO_STREAMING, &video->flags)) {
-				/* wait for resolution is available,
-				and it is also captured by host */
+				/*
+				 * Wait for resolution is available,
+				 * and it is also captured by host.
+				 */
 				do {
 					mdelay(100);
 					regmap_read(gfxi, DISPST, &dispst);
 				} while (nuvoton_video_vres(video) < 100 ||
-					nuvoton_video_pclk(video) == 0 ||
-					(dispst & DISPST_HSCROFF));
+					 nuvoton_video_pclk(video) == 0 ||
+					 (dispst & DISPST_HSCROFF));
 			}
 
 			det->width = nuvoton_video_hres(video);
@@ -1384,17 +1188,16 @@ static void nuvoton_video_get_resolution(struct nuvoton_video *video)
 		}
 	}
 
-	if (det->width == 0 ||
-	    det->height == 0) {
+	if (det->width == 0 || det->height == 0) {
 		det->width = MIN_WIDTH;
 		det->height = MIN_HEIGHT;
 		nuvoton_video_clear_gmmap(video);
 		video->v4l2_input_status = V4L2_IN_ST_NO_SIGNAL;
 	}
 
-	dev_dbg(video->dev, "Got resolution[%dx%d] -> [%dx%d]  status %d\n", act->width,
-		act->height, det->width,
-		 det->height, video->v4l2_input_status);
+	dev_dbg(video->dev, "Got resolution[%dx%d] -> [%dx%d]  status %d\n",
+		act->width, act->height, det->width, det->height,
+		video->v4l2_input_status);
 }
 
 static void nuvoton_video_set_resolution(struct nuvoton_video *video)
@@ -1403,7 +1206,7 @@ static void nuvoton_video_set_resolution(struct nuvoton_video *video)
 	struct regmap *vcd = video->vcd_regmap;
 	u32 mode;
 
-	/* Set video frame physical address*/
+	/* Set video frame physical address */
 	regmap_write(vcd, VCD_FBA_ADR, video->src.dma);
 	regmap_write(vcd, VCD_FBB_ADR, video->src.dma);
 
@@ -1422,13 +1225,13 @@ static void nuvoton_video_set_resolution(struct nuvoton_video *video)
 
 	clear_bit(VIDEO_FRAME_INPRG, &video->flags);
 
-	dev_dbg(video->dev, "VCD mode = 0x%x, %s mode\n",
-		mode,
+	dev_dbg(video->dev, "VCD mode = 0x%x, %s mode\n", mode,
 		nuvoton_video_is_mga(video) ? "Hi Res" : "VGA");
 
-	dev_dbg(video->dev, "Digital mode: %d x %d x %d, pixelclock %lld, bytesperline %d\n",
-		act->width, act->height, video->bytesperpixel,
-		act->pixelclock, video->bytesperline);
+	dev_dbg(video->dev,
+		"Digital mode: %d x %d x %d, pixelclock %lld, bytesperline %d\n",
+		act->width, act->height, video->bytesperpixel, act->pixelclock,
+		video->bytesperline);
 
 	return;
 }
@@ -1464,7 +1267,8 @@ static int nuvoton_video_start(struct nuvoton_video *video)
 		nuvoton_video_ece_set_fb_addr(video, video->src.dma);
 		nuvoton_video_ece_set_lp(video, video->bytesperline);
 
-		dev_dbg(video->dev, "ECE open: client %d\n", atomic_read(&video->ece.clients));
+		dev_dbg(video->dev, "ECE open: client %d\n",
+			atomic_read(&video->ece.clients));
 	}
 
 	return 0;
@@ -1502,11 +1306,12 @@ static void nuvoton_video_stop(struct nuvoton_video *video)
 
 	video->v4l2_input_status = V4L2_IN_ST_NO_SIGNAL;
 	video->flags = 0;
-	video->ctrl_cmd = VCD_CMD_OP_CAPTURE;
+	video->ctrl_cmd = VCD_CMD_OPERATION_CAPTURE;
 
 	if (atomic_dec_return(&video->ece.clients) == 0) {
 		nuvoton_video_ece_stop(video);
-		dev_dbg(video->dev, "ECE close: client %d\n", atomic_read(&video->ece.clients));
+		dev_dbg(video->dev, "ECE close: client %d\n",
+			atomic_read(&video->ece.clients));
 	}
 }
 
@@ -1524,7 +1329,7 @@ static int nuvoton_video_querycap(struct file *file, void *fh,
 static int nuvoton_video_enum_format(struct file *file, void *fh,
 				     struct v4l2_fmtdesc *f)
 {
-	if (f->index > NUM_FORMATS)
+	if (f->index)
 		return -EINVAL;
 
 	f->pixelformat = V4L2_PIX_FMT_RGB565;
@@ -1558,16 +1363,14 @@ static int nuvoton_video_enum_input(struct file *file, void *fh,
 	return 0;
 }
 
-static int
-nuvoton_video_get_input(struct file *file, void *fh, unsigned int *i)
+static int nuvoton_video_get_input(struct file *file, void *fh, unsigned int *i)
 {
 	*i = 0;
 
 	return 0;
 }
 
-static int
-nuvoton_video_set_input(struct file *file, void *fh, unsigned int i)
+static int nuvoton_video_set_input(struct file *file, void *fh, unsigned int i)
 {
 	if (i)
 		return -EINVAL;
@@ -1601,7 +1404,7 @@ static int nuvoton_video_set_parm(struct file *file, void *fh,
 
 	if (a->parm.capture.timeperframe.numerator)
 		frame_rate = a->parm.capture.timeperframe.denominator /
-			a->parm.capture.timeperframe.numerator;
+			     a->parm.capture.timeperframe.numerator;
 
 	if (!frame_rate || frame_rate > MAX_FRAME_RATE) {
 		frame_rate = 0;
@@ -1656,13 +1459,13 @@ static int nuvoton_video_enum_frameintervals(struct file *file, void *fh,
 	return 0;
 }
 
-static int nuvoton_video_get_vid_overlay(struct file *file, void *fh, struct v4l2_format *fmt)
+static int nuvoton_video_get_vid_overlay(struct file *file, void *fh,
+					 struct v4l2_format *fmt)
 {
 	struct nuvoton_video *video = video_drvdata(file);
 	struct v4l2_window *win = &fmt->fmt.win;
 	struct list_head *head, *pos, *nx;
 	struct rect_list *entry, *tmp;
-	unsigned long flags;
 
 	if(video->list && video->rect) {
 		win->clipcount = video->rect[video->vb_index];
@@ -1683,13 +1486,13 @@ static int nuvoton_video_get_vid_overlay(struct file *file, void *fh, struct v4l
 				video->rect[video->vb_index]--;
 		}
 
-                list_for_each_safe(pos, nx, head) {
-                        tmp = list_entry(pos, struct rect_list, list);
-                        if (tmp) {
-                                list_del(&tmp->list);
-                                kfree(tmp);
-                        }
-                }
+		list_for_each_safe(pos, nx, head) {
+			tmp = list_entry(pos, struct rect_list, list);
+			if (tmp) {
+				list_del(&tmp->list);
+				kfree(tmp);
+			}
+		}
 	}
 
 	return 0;
@@ -1751,7 +1554,7 @@ static int nuvoton_video_enum_dv_timings(struct file *file, void *fh,
 					 struct v4l2_enum_dv_timings *timings)
 {
 	return v4l2_enum_dv_timings_cap(timings, &nuvoton_video_timings_cap,
-				       NULL, NULL);
+					NULL, NULL);
 }
 
 static int nuvoton_video_dv_timings_cap(struct file *file, void *fh,
@@ -1814,15 +1617,15 @@ static const struct v4l2_ioctl_ops nuvoton_video_ioctls = {
 static int nuvoton_video_set_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct nuvoton_video *video = container_of(ctrl->handler,
-						  struct nuvoton_video,
-						  ctrl_handler);
+						   struct nuvoton_video,
+						   ctrl_handler);
 
 	switch (ctrl->id) {
 	case V4L2_CID_DETECT_MD_MODE:
 		if (ctrl->val == V4L2_DETECT_MD_MODE_GLOBAL)
-			video->ctrl_cmd = VCD_CMD_OP_CAPTURE;
+			video->ctrl_cmd = VCD_CMD_OPERATION_CAPTURE;
 		else
-			video->ctrl_cmd = VCD_CMD_OP_COMPARE;
+			video->ctrl_cmd = VCD_CMD_OPERATION_COMPARE;
 	break;
 	default:
 		return -EINVAL;
@@ -1885,9 +1688,9 @@ static const struct v4l2_file_operations nuvoton_video_v4l2_fops = {
 
 static int nuvoton_video_queue_setup(struct vb2_queue *q,
 				     unsigned int *num_buffers,
-				    unsigned int *num_planes,
-				    unsigned int sizes[],
-				    struct device *alloc_devs[])
+				     unsigned int *num_planes,
+				     unsigned int sizes[],
+				     struct device *alloc_devs[])
 {
 	struct nuvoton_video *video = vb2_get_drv_priv(q);
 	int i;
@@ -1917,9 +1720,9 @@ static int nuvoton_video_queue_setup(struct vb2_queue *q,
 		video->list = NULL;
 	}
 
-	video->list = (struct list_head *)kzalloc(sizeof(*video->list) * *num_buffers, GFP_KERNEL);
+	video->list = kzalloc(sizeof(*video->list) * *num_buffers, GFP_KERNEL);
 
-	for (i = 0 ; i < *num_buffers ; i++)
+	for (i = 0; i < *num_buffers; i++)
 		INIT_LIST_HEAD(&video->list[i]);
 
 	video->num_buffers = *num_buffers;
@@ -1972,7 +1775,7 @@ static void nuvoton_video_stop_streaming(struct vb2_queue *q)
 
 	nuvoton_video_bufs_done(video, VB2_BUF_STATE_ERROR);
 
-	video->ctrl_cmd = VCD_CMD_OP_CAPTURE;
+	video->ctrl_cmd = VCD_CMD_OPERATION_CAPTURE;
 }
 
 static void nuvoton_video_buf_queue(struct vb2_buffer *vb)
@@ -2001,15 +1804,15 @@ static void nuvoton_video_buf_finish(struct vb2_buffer *vb)
 	dev_dbg(video->dev, "%s\n", __func__);
 
 	ret = regmap_read_poll_timeout(vcd, VCD_STAT, val,
-					!(val & VCD_STAT_BUSY),
-					1000, VCD_BUSY_TIMEOUT_US);
+				       !(val & VCD_STAT_BUSY), 1000,
+				       VCD_BUSY_TIMEOUT_US);
 
 	if(ret) {
 		dev_warn(video->dev, "wait for VCD_STAT_BUSY timeout\n");
 		return;
 	}
 
-	// capture next frame when a video buffer is dequeued
+	/* Capture next frame when a video buffer is dequeued */
 	nuvoton_video_start_frame(video);
 
 	video->vb_index = vb->index;
@@ -2046,16 +1849,15 @@ static int nuvoton_video_setup_video(struct nuvoton_video *video)
 
 	v4l2_ctrl_handler_init(&video->ctrl_handler, 10);
 
-	v4l2_ctrl_new_std_menu(&video->ctrl_handler,
-		&nuvoton_video_ctrl_ops,
-		V4L2_CID_DETECT_MD_MODE,
-		V4L2_DETECT_MD_MODE_REGION_GRID,
-		0, V4L2_DETECT_MD_MODE_GLOBAL);
+	v4l2_ctrl_new_std_menu(&video->ctrl_handler, &nuvoton_video_ctrl_ops,
+			       V4L2_CID_DETECT_MD_MODE,
+			       V4L2_DETECT_MD_MODE_REGION_GRID, 0,
+			       V4L2_DETECT_MD_MODE_GLOBAL);
 
 
 	if (video->ctrl_handler.error) {
 		dev_err(video->dev, "Failed to init controls: %d\n",
-		 	video->ctrl_handler.error);
+		video->ctrl_handler.error);
 
 		rc = video->ctrl_handler.error;
 
@@ -2090,7 +1892,7 @@ static int nuvoton_video_setup_video(struct nuvoton_video *video)
 	vdev->queue = vbq;
 	vdev->fops = &nuvoton_video_v4l2_fops;
 	vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_READWRITE |
-		V4L2_CAP_STREAMING;
+			    V4L2_CAP_STREAMING;
 	vdev->v4l2_dev = v4l2_dev;
 	strscpy(vdev->name, DEVICE_NAME, sizeof(vdev->name));
 	vdev->vfl_type = VFL_TYPE_VIDEO;
@@ -2126,7 +1928,7 @@ static int nuvoton_video_init(struct nuvoton_video *video)
 	}
 
 	rc = devm_request_threaded_irq(dev, irq, NULL, nuvoton_video_irq,
-				IRQF_ONESHOT, DEVICE_NAME, video);
+				       IRQF_ONESHOT, DEVICE_NAME, video);
 	if (rc < 0) {
 		dev_err(dev, "Unable to request IRQ %d\n", irq);
 		return rc;
@@ -2142,27 +1944,23 @@ static int nuvoton_video_init(struct nuvoton_video *video)
 	if (rc) {
 		dev_err(dev, "Failed to set DMA mask\n");
 		of_reserved_mem_device_release(dev);
-		goto err_release_reserved_mem;
 	}
-
-err_release_reserved_mem:
-	of_reserved_mem_device_release(dev);
 
 	return rc;
 }
 
 static const struct regmap_config nuvoton_video_regmap_cfg = {
-	.reg_bits       = 32,
-	.reg_stride     = 4,
-	.val_bits       = 32,
-	.max_register   = VCD_FIFO,
+	.reg_bits	= 32,
+	.reg_stride	= 4,
+	.val_bits	= 32,
+	.max_register	= VCD_FIFO,
 };
 
 static const struct regmap_config nuvoton_video_ece_regmap_cfg = {
-	.reg_bits       = 32,
-	.reg_stride     = 4,
-	.val_bits       = 32,
-	.max_register   = ECE_HEX_RECT_OFFSET,
+	.reg_bits	= 32,
+	.reg_stride	= 4,
+	.val_bits	= 32,
+	.max_register	= ECE_HEX_RECT_OFFSET,
 };
 
 static int nuvoton_video_probe(struct platform_device *pdev)
@@ -2188,7 +1986,7 @@ static int nuvoton_video_probe(struct platform_device *pdev)
 	}
 
 	video->vcd_regmap = devm_regmap_init_mmio(&pdev->dev, regs,
-						&nuvoton_video_regmap_cfg);
+						  &nuvoton_video_regmap_cfg);
 	if (IS_ERR(video->vcd_regmap)) {
 		dev_err(&pdev->dev, "Failed to init VCD regmap!\n");
 		return PTR_ERR(video->vcd_regmap);
@@ -2201,7 +1999,7 @@ static int nuvoton_video_probe(struct platform_device *pdev)
 	}
 
 	video->ece.regmap = devm_regmap_init_mmio(&pdev->dev, regs,
-						&nuvoton_video_ece_regmap_cfg);
+						  &nuvoton_video_ece_regmap_cfg);
 	if (IS_ERR(video->ece.regmap)) {
 		dev_err(&pdev->dev, "Failed to init ECE regmap!\n");
 		return PTR_ERR(video->ece.regmap);

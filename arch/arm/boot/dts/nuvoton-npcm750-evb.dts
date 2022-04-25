@@ -80,10 +80,10 @@
 		};
 
                 video_memory: framebuffer {
-                       reg = <0x1b000000 0x01000000>;
-                       alignment = <0x01000000>;
                        compatible = "shared-dma-pool";
+                       reg = <0x1b000000 0x02000000>;
                        reusable;
+                       linux,cma-default;
                };
 
 	};
