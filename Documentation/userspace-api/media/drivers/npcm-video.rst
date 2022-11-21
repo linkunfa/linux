@@ -30,16 +30,34 @@ The VCD engine supports two modes:
 Application can use ``V4L2_CID_NPCM_CAPTURE_MODE`` control to set the VCD mode
 with different control values:
 
-- ``V4L2_NPCM_CAPTURE_MODE_COMPLETE``: set to COMPLETE mode.
-- ``V4L2_NPCM_CAPTURE_MODE_DIFF``: set to DIFF mode.
+- ``V4L2_NPCM_CAPTURE_MODE_COMPLETE``: will set VCD to COMPLETE mode.
+- ``V4L2_NPCM_CAPTURE_MODE_DIFF``: will set VCD to DIFF mode.
 
 V4L2_CID_NPCM_RECT_COUNT
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-The ECE will compress the captured data into HEXTILE format. Application can use
-``V4L2_CID_NPCM_RECT_COUNT`` control to get the count of compressed HEXTILE
-rectangles which is relevant to the number of differentiated frames if VCD is in
-DIFF mode. And the count will always be 1 if VCD is in COMPLETE mode.
+After frame data is captured, the ECE will compress the data into HEXTILE format
+and store these HEXTILE rectangles data in V4L2 video buffer with the layout
+defined in Remote Framebuffer Protocol:
+::
+
+              (RFC 6143, https://www.rfc-editor.org/rfc/rfc6143.html#section-7.6.1)
+              
+              +--------------+--------------+-------------------+
+              | No. of bytes | Type [Value] | Description       |
+              +--------------+--------------+-------------------+
+              | 2            | U16          | x-position        |
+              | 2            | U16          | y-position        |
+              | 2            | U16          | width             |
+              | 2            | U16          | height            |
+              | 4            | S32          | encoding-type (5) |
+              +--------------+--------------+-------------------+
+              |             HEXTILE rectangle data              |
+              +-------------------------------------------------+
+
+Application can get these data by V4L2 interfaces and use ``V4L2_CID_NPCM_RECT_COUNT``
+control to get the count of HEXTILE rectangles that can be put in FramebufferUpdate
+header (field number-of-rectangles).
 
 References
 ----------
