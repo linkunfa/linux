@@ -28,7 +28,7 @@ The VCD engine supports two modes:
   differentiated frame in memory.
 
 Application can use ``V4L2_CID_NPCM_CAPTURE_MODE`` control to set the VCD mode
-with different control values:
+with different control values (enum v4l2_npcm_capture_mode):
 
 - ``V4L2_NPCM_CAPTURE_MODE_COMPLETE``: will set VCD to COMPLETE mode.
 - ``V4L2_NPCM_CAPTURE_MODE_DIFF``: will set VCD to DIFF mode.
