@@ -17,34 +17,10 @@ Please read the Documentation/process/changes.rst file, as it contains
 requirements for building and running the kernel, and information about
 the problems which may result by upgrading your kernel.
 
->HEXTITLE -> HEXTILE
->Ditto.
->Why not let npcm_video_set_resolution() set active_timings?
->And also update pix_fmt? That will also simplify npcm_video_set_dv_timings().
 
->This must be of TYPE_MENU. It selects between two
->modes, so that is typically a MENU control. That way you can list
->the possible modes and get a human-readable name for each setting.
 
-Will modify in v14.
+  CC      drivers/media/platform/nuvoton/npcm-video.o
+  CHECK   drivers/media/platform/nuvoton/npcm-video.c
+drivers/media/platform/nuvoton/npcm-video.c:1004 npcm_video_raw() warn: sleeping in atomic context
+drivers/media/platform/nuvoton/npcm-video.c:1089 npcm_video_irq() warn: sleeping in atomic context
 
->I don't really like the way it is set up now since if userspace is
->slow in processing a frame the control might have been updated already
->for the next frame and you get the wrong value for the buffer you are
->processing.
-
-After userspace app dequeue a buffer, it needs to know the count of Hextile rectangles in the buffer,
-so app will call this contorl to get the rect count.
-And when a buffer is dequeued, npcm_video_buf_finish() will be called, in which the buffer index (vb->index)
-will be stored. Then, npcm_video_get_volatile_ctrl() will return the rect count of the desired buffer index.
-I think there's no issue even if userspace is slow, is there anything I missed?
-
->You can drop this test, it's done automatically by the vb2 core.
->However, isn't it much easier to just have a fixed 'video->list[VIDEO_MAX_FRAME]' array
-rather than dynamically allocating it? It would simplify the code, and all you need to
-do here is call INIT_LIST_HEAD for all (VIDEO_MAX_FRAME) array elements.
->You can drop the num_buffers field: just use the num_buffers field of vb2_queue.
->This code is incomplete anyway since it doesn't deal with VIDIOC_CREATE_BUFS.
->Much easier to just rely on the vb2_queue informatio
-
-Will modify as you suggested. Thanks.
