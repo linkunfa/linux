@@ -24,3 +24,23 @@ the problems which may result by upgrading your kernel.
 drivers/media/platform/nuvoton/npcm-video.c:1004 npcm_video_raw() warn: sleeping in atomic context
 drivers/media/platform/nuvoton/npcm-video.c:1089 npcm_video_irq() warn: sleeping in atomic context
 
+
+--- a/drivers/media/platform/nuvoton/npcm-video.c
++++ b/drivers/media/platform/nuvoton/npcm-video.c
+@@ -412,7 +412,7 @@ static unsigned int npcm_video_add_rect(struct npcm_video *video,
+        struct rect_list *list = NULL;
+        struct v4l2_rect *r;
+
+-       list = kzalloc(sizeof(*list), GFP_KERNEL);
++       list = kzalloc(sizeof(*list), GFP_ATOMIC);
+        if (!list)
+                return 0;
+
+@@ -467,7 +467,7 @@ static struct rect_list *npcm_video_new_rect(struct npcm_video *video,
+        struct rect_list *list = NULL;
+        struct v4l2_rect *r;
+
+-       list = kzalloc(sizeof(*list), GFP_KERNEL);
++       list = kzalloc(sizeof(*list), GFP_ATOMIC);
+        if (!list)
+                return NULL;
