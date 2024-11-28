@@ -387,6 +387,15 @@ static bool svc_i3c_master_error(struct svc_i3c_master *master)
 	return false;
 }
 
+static void svc_i3c_master_set_sda_skew(struct svc_i3c_master *master, int skew)
+{
+	u32 val;
+
+	val = readl(master->regs + SVC_I3C_MCONFIG) & ~SVC_I3C_MCONFIG_SKEW_MASK;
+	val |= SVC_I3C_MCONFIG_SKEW(skew);
+	writel(val, master->regs + SVC_I3C_MCONFIG);
+}
+
 static void svc_i3c_master_enable_interrupts(struct svc_i3c_master *master, u32 mask)
 {
 	writel(mask, master->regs + SVC_I3C_MINTSET);
@@ -845,8 +854,7 @@ static int svc_i3c_master_bus_init(struct i3c_master_controller *m)
 	unsigned long i3c_scl_rate, i2c_scl_rate;
 	unsigned int pp_high_period_ns, od_low_period_ns, i2c_period_ns;
 	unsigned int scl_period_ns;
-	int ppbaud, pplow, odhpp, odbaud, odstop = 0, i2cbaud, skew;
-	u32 reg;
+	u32 ppbaud, pplow, odhpp, odbaud, odstop = 0, i2cbaud, reg;
 	int ret;
 
 	ret = pm_runtime_resume_and_get(master->dev);
@@ -928,8 +936,6 @@ static int svc_i3c_master_bus_init(struct i3c_master_controller *m)
 	if (bus->mode != I3C_BUS_MODE_PURE)
 		odstop = 1;
 
-	skew = min(7, ((ppbaud + 1) / 2));
-
 	reg = SVC_I3C_MCONFIG_MASTER_EN |
 	      SVC_I3C_MCONFIG_DISTO(0) |
 	      SVC_I3C_MCONFIG_HKEEP(3) |
@@ -938,7 +944,7 @@ static int svc_i3c_master_bus_init(struct i3c_master_controller *m)
 	      SVC_I3C_MCONFIG_PPLOW(pplow) |
 	      SVC_I3C_MCONFIG_ODBAUD(odbaud) |
 	      SVC_I3C_MCONFIG_ODHPP(odhpp) |
-	      SVC_I3C_MCONFIG_SKEW(skew) |
+	      SVC_I3C_MCONFIG_SKEW(0) |
 	      SVC_I3C_MCONFIG_I2CBAUD(i2cbaud);
 	writel(reg, master->regs + SVC_I3C_MCONFIG);
 
@@ -953,8 +959,8 @@ static int svc_i3c_master_bus_init(struct i3c_master_controller *m)
 		 od_low_period_ns);
 	dev_dbg(master->dev, "i2c_high=%u, i2c_low=%u\n", ((i2cbaud >> 1) + 1) * od_low_period_ns,
 			((i2cbaud >> 1) + 1 + (i2cbaud % 2)) * od_low_period_ns);
-	dev_dbg(master->dev, "ppbaud=%d, pplow=%d, odbaud=%d, i2cbaud=%d, skew=%d\n",
-		ppbaud, pplow, odbaud, i2cbaud, skew);
+	dev_dbg(master->dev, "ppbaud=%d, pplow=%d, odbaud=%d, i2cbaud=%d\n",
+		ppbaud, pplow, odbaud, i2cbaud);
 	dev_info(master->dev, "mconfig=0x%x\n", readl(master->regs + SVC_I3C_MCONFIG));
 	/* Master core's registration */
 	ret = i3c_master_get_free_addr(m, 0);
@@ -1340,7 +1346,14 @@ static int svc_i3c_master_do_daa(struct i3c_master_controller *m)
 
 	mutex_lock(&master->lock);
 	spin_lock_irqsave(&master->req_lock, flags);
+	/*
+	 * Fix SCL/SDA timing issue during DAA.
+	 * Set SKEW bit to 1 before initiating a DAA, set SKEW bit to 0
+	 * after DAA is completed.
+	 */
+	svc_i3c_master_set_sda_skew(master, 1);
 	ret = svc_i3c_master_do_daa_locked(master, addrs, &dev_nb);
+	svc_i3c_master_set_sda_skew(master, 0);
 	spin_unlock_irqrestore(&master->req_lock, flags);
 	mutex_unlock(&master->lock);
 	if (ret) {
