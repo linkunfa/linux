@@ -1562,7 +1562,7 @@ static int svc_i3c_master_xfer(struct svc_i3c_master *master,
 	u32 reg, rdterm = *read_len, mstatus;
 	int ret, i, count, space;
 	unsigned long flags;
-	unsigned long start;
+	ktime_t timeout;
 	u32 ibiresp;
 
 	if (rdterm > SVC_I3C_MAX_RDTERM)
@@ -1627,7 +1627,6 @@ static int svc_i3c_master_xfer(struct svc_i3c_master *master,
 		svc_i3c_master_start_dma(master);
 	}
 
-	start = jiffies;
 	/*
 	 * IBI payload size may be larger than rdterm, use manual IBI response
 	 * for read operation to set the proper RDTERM value in IBI ack request.
@@ -1636,6 +1635,7 @@ static int svc_i3c_master_xfer(struct svc_i3c_master *master,
 		ibiresp = rnw ? SVC_I3C_MCTRL_IBIRESP_MANUAL : SVC_I3C_MCTRL_IBIRESP_AUTO;
 	else
 		ibiresp = SVC_I3C_MCTRL_IBIRESP_MANUAL;
+	timeout = ktime_add_ms(ktime_get(), 1000);
 retry_start:
 	writel(SVC_I3C_MCTRL_REQUEST_START_ADDR |
 	       xfer_type |
@@ -1697,7 +1697,7 @@ retry_start:
 			master->rd_ibiwon_cnt++;
 		else
 			master->wr_ibiwon_cnt++;
-		if (time_after(jiffies, start + msecs_to_jiffies(1000))) {
+		if (ktime_after(ktime_get(), timeout)) {
 			dev_info(master->dev, "abnormal ibiwon events\n");
 			goto emit_stop_locked;
 		}
