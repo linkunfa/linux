@@ -854,7 +854,7 @@ static int svc_i3c_master_bus_init(struct i3c_master_controller *m)
 	unsigned long i3c_scl_rate, i2c_scl_rate;
 	unsigned int pp_high_period_ns, od_low_period_ns, i2c_period_ns;
 	unsigned int scl_period_ns;
-	u32 ppbaud, pplow, odhpp, odbaud, odstop = 0, i2cbaud, reg;
+	u32 ppbaud, pplow, odhpp, odbaud, i2cbaud, reg;
 	int ret;
 
 	ret = pm_runtime_resume_and_get(master->dev);
@@ -933,13 +933,10 @@ static int svc_i3c_master_bus_init(struct i3c_master_controller *m)
 	i3c_scl_rate = 1000000000 / (((ppbaud + 1) * 2 + pplow) * fclk_period_ns);
 	i2c_scl_rate = 1000000000 / ((i2cbaud + 2) * od_low_period_ns);
 
-	if (bus->mode != I3C_BUS_MODE_PURE)
-		odstop = 1;
-
 	reg = SVC_I3C_MCONFIG_MASTER_EN |
 	      SVC_I3C_MCONFIG_DISTO(0) |
 	      SVC_I3C_MCONFIG_HKEEP(3) |
-	      SVC_I3C_MCONFIG_ODSTOP(odstop) |
+	      SVC_I3C_MCONFIG_ODSTOP(1) |
 	      SVC_I3C_MCONFIG_PPBAUD(ppbaud) |
 	      SVC_I3C_MCONFIG_PPLOW(pplow) |
 	      SVC_I3C_MCONFIG_ODBAUD(odbaud) |
