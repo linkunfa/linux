@@ -369,6 +369,10 @@
 	status = "okay";
 };
 
+&gdma0 {
+	status = "okay";
+};
+
 &udc0 {
 	status = "okay";
 };
@@ -673,7 +677,8 @@
 	status = "okay";
 	i3c-scl-hz = <12500000>;
 	i2c-scl-hz = <400000>;
-	use-dma;
+	dmas = <&gdma0 0>, <&gdma0 1>;
+	dma-names = "tx", "rx";
 };
 
 &i3c1 {
